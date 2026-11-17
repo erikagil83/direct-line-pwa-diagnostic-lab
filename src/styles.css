@@ -1,0 +1,17 @@
+body { margin: 0; font-family: "Segoe UI", Roboto, sans-serif; }
+.app { max-width: 720px; margin: 0 auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; box-sizing: border-box; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+.messages { height: 40vh; min-height: 160px; overflow-y: auto; border: 1px solid #d1d1d1; border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.bubble { padding: 6px 10px; border-radius: 10px; max-width: 85%; word-break: break-word; }
+.bubble.user { align-self: flex-end; background: #0f6cbd; color: #fff; }
+.bubble.bot { align-self: flex-start; background: #ebebeb; }
+.composer { display: flex; gap: 8px; margin-top: 8px; }
+.composer-input { flex: 1; }
+.facts { margin: 8px 0; }
+.fact { display: flex; flex-direction: column; padding: 2px 0; border-bottom: 1px solid #eee; }
+.fact dt { font-size: 12px; color: #616161; }
+.fact dd { margin: 0; font-size: 13px; word-break: break-all; }
+.events { padding-left: 18px; font-size: 12px; max-height: 40vh; overflow-y: auto; }
+.events li { margin-bottom: 4px; }
+.ts { color: #616161; }
+.summary { color: #424242; word-break: break-word; }
