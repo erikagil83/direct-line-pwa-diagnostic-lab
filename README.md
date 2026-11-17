@@ -14,6 +14,8 @@ npm start                   # http://localhost:3000
 
 ```
 DIRECT_LINE_TOKEN_ENDPOINT=<your Copilot Studio token endpoint>
+# Optional: seconds in the background after which the connection is recreated on return (default 120)
+STALE_AFTER_HIDDEN_SECONDS=120
 ```
 
 Find it in Copilot Studio: Channels > Mobile app (or Web channel) > Token endpoint. It must return `{ token, conversationId, expires_in }`. Restart `npm start` after editing `.env`. Never put a Direct Line secret in this file. The agent must be published.

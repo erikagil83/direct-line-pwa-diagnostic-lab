@@ -27,7 +27,8 @@ module.exports = (env, argv) => {
     plugins: [
       // Only this single value is exposed to the frontend.
       new webpack.DefinePlugin({
-        'process.env.DIRECT_LINE_TOKEN_ENDPOINT': JSON.stringify(process.env.DIRECT_LINE_TOKEN_ENDPOINT || '')
+        'process.env.DIRECT_LINE_TOKEN_ENDPOINT': JSON.stringify(process.env.DIRECT_LINE_TOKEN_ENDPOINT || ''),
+        'process.env.STALE_AFTER_HIDDEN_SECONDS': JSON.stringify(process.env.STALE_AFTER_HIDDEN_SECONDS || '')
       }),
       new HtmlWebpackPlugin({ template: './public/index.html' }),
       new CopyWebpackPlugin({

@@ -38,7 +38,9 @@ const MAX_RECOVERY_ATTEMPTS = 3;
 const RECOVERY_BACKOFF_MS = 2000; // multiplied by the attempt number
 const ONLINE_TIMEOUT_MS = 20000;
 // After this long in the background the socket may be silently dead even if the status still says Online.
-const STALE_AFTER_HIDDEN_MS = 2 * 60 * 1000;
+// Configurable with STALE_AFTER_HIDDEN_SECONDS in .env (default 120).
+const configuredSeconds = Number(process.env.STALE_AFTER_HIDDEN_SECONDS);
+const STALE_AFTER_HIDDEN_MS = (Number.isFinite(configuredSeconds) && configuredSeconds > 0 ? configuredSeconds : 120) * 1000;
 
 export class DirectLineService {
   private directLine: DirectLine | null = null;
