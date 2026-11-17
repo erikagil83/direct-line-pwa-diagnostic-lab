@@ -48,6 +48,20 @@ Recovery: sending is paused and a "Reconnecting" status is shown, the old subscr
 4. Go offline: `NETWORK_OFFLINE`, then `NETWORK_ONLINE`.
 5. Download the logs.
 
+## Testing on an Android phone
+
+Recommended steps (no USB cable needed):
+
+```
+npm run build
+npx serve dist -l 4000
+
+winget install Cloudflare.cloudflared
+cloudflared tunnel --url http://localhost:4000
+```
+
+Replace the port if you served on a different one. Open the `https://...trycloudflare.com` URL printed by `cloudflared` in Chrome on the phone, then install the PWA from the browser menu (Add to Home screen / Install app). Run the tests below and use **Download logs** to export the results.
+
 ## Android / Zebra test plan
 
 | # | Test | Steps | Expected result |
