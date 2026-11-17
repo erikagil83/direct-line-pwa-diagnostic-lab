@@ -23,19 +23,22 @@ const telemetry = new TelemetryService(createIdentity());
 export function App() {
   const [state, setState] = useState<ConnectionState>('Not connected');
   const [offline, setOffline] = useState(!navigator.onLine);
+  const [notice, setNotice] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const serviceRef = useRef<DirectLineService | null>(null);
 
   if (!serviceRef.current) {
     serviceRef.current = new DirectLineService(telemetry, process.env.DIRECT_LINE_TOKEN_ENDPOINT as string, {
       onState: setState,
+      onNotice: setNotice,
       onMessageResult: result => telemetry.setContext({ lastMessageResult: result }),
       onActivity: (activity, receivedAt) => {
         telemetry.setContext({ lastActivityReceivedAt: receivedAt });
         const a = activity as { id?: string; type: string; text?: string; from?: { id?: string; role?: string } };
         // Direct Line echoes the user's own messages back; only show bot messages.
         if (a.type === 'message' && a.text && a.from?.role !== 'user' && a.from?.id !== 'user') {
-          setMessages(m => [...m, { id: a.id ?? crypto.randomUUID(), from: 'bot', text: a.text as string }]);
+          const id = a.id ?? crypto.randomUUID();
+          setMessages(m => (m.some(x => x.id === id) ? m : [...m, { id, from: 'bot', text: a.text as string }]));
         }
       }
     });
@@ -45,19 +48,36 @@ export function App() {
   useEffect(() => {
     const stopLifecycle = startLifecycleDiagnostics(telemetry);
     const stopErrors = startGlobalErrorDiagnostics(telemetry);
-    const sync = () => setOffline(!navigator.onLine);
-    window.addEventListener('online', sync);
-    window.addEventListener('offline', sync);
+    let hiddenAt: number | null = null;
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        hiddenAt = Date.now();
+        return;
+      }
+      const hiddenMs = hiddenAt === null ? 0 : Date.now() - hiddenAt;
+      hiddenAt = null;
+      service.evaluate('foreground', hiddenMs);
+    };
+    const onOnline = () => {
+      setOffline(false);
+      service.evaluate('network_online');
+    };
+    const onOffline = () => setOffline(true);
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
     return () => {
       stopLifecycle();
       stopErrors();
-      window.removeEventListener('online', sync);
-      window.removeEventListener('offline', sync);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
       service.disconnect();
     };
   }, [service]);
 
-  const displayState: ConnectionState = offline && (state === 'Online' || state === 'Connecting') ? 'Offline' : state;
+  const displayState: ConnectionState =
+    offline && (state === 'Online' || state === 'Connecting' || state === 'Reconnecting') ? 'Offline' : state;
 
   const send = (text: string) => {
     setMessages(m => [...m, { id: crypto.randomUUID(), from: 'user', text }]);
@@ -70,6 +90,7 @@ export function App() {
         <header><Title3 as="h1">Direct Line PWA Diagnostic Lab</Title3></header>
         <ChatPanel
           state={displayState}
+          notice={notice}
           messages={messages}
           onConnect={() => void service.connect()}
           onDisconnect={() => service.disconnect()}

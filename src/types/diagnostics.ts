@@ -18,7 +18,7 @@ export interface TokenMetadata {
   conversationId: string;
 }
 
-export type ConnectionState = 'Not connected' | 'Connecting' | 'Online' | 'Offline' | 'Error';
+export type ConnectionState = 'Not connected' | 'Connecting' | 'Reconnecting' | 'Online' | 'Offline' | 'Error';
 
 export interface AppIdentity {
   currentInstanceId: string;

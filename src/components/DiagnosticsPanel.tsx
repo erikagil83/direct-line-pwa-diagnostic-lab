@@ -18,7 +18,7 @@ function summarize(r: TelemetryRecord): string {
   const d = r.details;
   const parts: string[] = [];
   for (const key of ['statusName', 'status', 'visibilityState', 'persisted', 'navigationType', 'activityType', 'activityId',
-    'textLength', 'elapsedMs', 'expiresInSeconds', 'changed', 'name', 'message']) {
+    'textLength', 'elapsedMs', 'expiresInSeconds', 'changed', 'name', 'message', 'trigger', 'attempt', 'healthy', 'reasons']) {
     if (d[key] !== undefined) parts.push(`${key}=${typeof d[key] === 'object' ? JSON.stringify(d[key]) : d[key]}`);
   }
   const error = d.error as { message?: string } | undefined;

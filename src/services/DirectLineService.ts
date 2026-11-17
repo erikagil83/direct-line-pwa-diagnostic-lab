@@ -13,6 +13,7 @@ const STATUS_NAMES: Record<number, string> = {
 
 export interface DirectLineHandlers {
   onState: (state: ConnectionState) => void;
+  onNotice: (text: string | null) => void;
   onActivity: (activity: Activity, receivedAt: string) => void;
   onMessageResult: (result: MessageResult) => void;
 }
@@ -33,6 +34,12 @@ interface Unsubscribable {
   unsubscribe(): void;
 }
 
+const MAX_RECOVERY_ATTEMPTS = 3;
+const RECOVERY_BACKOFF_MS = 2000; // multiplied by the attempt number
+const ONLINE_TIMEOUT_MS = 20000;
+// After this long in the background the socket may be silently dead even if the status still says Online.
+const STALE_AFTER_HIDDEN_MS = 2 * 60 * 1000;
+
 export class DirectLineService {
   private directLine: DirectLine | null = null;
   private subscriptions: Unsubscribable[] = [];
@@ -41,6 +48,11 @@ export class DirectLineService {
   private connecting = false;
   private failed = false;
   private generation = 0;
+  private lastStatus: ConnectionStatus = ConnectionStatus.Uninitialized;
+  private wanted = false; // a session was established and the user has not disconnected
+  private recovering = false;
+  private needsRecovery = false;
+  private waiter: ((online: boolean) => void) | null = null;
 
   constructor(
     private readonly telemetry: TelemetryService,
@@ -49,35 +61,73 @@ export class DirectLineService {
   ) {}
 
   get isActive(): boolean {
-    return this.connecting || this.directLine !== null;
+    return this.connecting || this.recovering || this.directLine !== null;
   }
 
   async connect(): Promise<void> {
     if (this.failed) {
-      // Failed instance: release it before creating a new one (manual Connect only, never automatic).
+      // Failed instance: release it before creating a new one (manual Connect only).
       this.teardown();
       this.failed = false;
       this.telemetry.add('DIRECT_LINE_DISCONNECTED', 'info', { reason: 'replaced_after_failure' });
     }
     if (this.isActive) return; // prevents duplicate instances and subscriptions
     this.connecting = true;
+    this.needsRecovery = false;
     const generation = ++this.generation;
+    this.handlers.onNotice(null);
     this.handlers.onState('Connecting');
 
+    const opened = await this.open(generation);
+    if (generation !== this.generation) return; // disconnected meanwhile
+    this.connecting = false;
+    if (!opened) this.handlers.onState('Error');
+  }
+
+  // Called when the app returns to the foreground or the network comes back.
+  evaluate(trigger: string, hiddenMs = 0): void {
+    if (!this.wanted || this.recovering || this.connecting) return;
+    const reasons: string[] = [];
+    if (this.needsRecovery) reasons.push('pending_recovery');
+    if (this.lastStatus !== ConnectionStatus.Online) reasons.push(`status_${STATUS_NAMES[this.lastStatus]}`);
+    if (hiddenMs > STALE_AFTER_HIDDEN_MS) reasons.push('background_stale');
+    this.telemetry.add('CONNECTION_HEALTH_CHECK', reasons.length ? 'warning' : 'info', {
+      trigger,
+      healthy: reasons.length === 0,
+      reasons,
+      hiddenMs: Math.round(hiddenMs),
+      statusName: STATUS_NAMES[this.lastStatus],
+      directLineInstanceId: this.instanceId
+    });
+    if (reasons.length) void this.recover(reasons[0]);
+  }
+
+  disconnect(): void {
+    if (!this.isActive) return;
+    this.generation++; // invalidates any in-flight token request or recovery
+    this.connecting = false;
+    this.recovering = false;
+    this.wanted = false;
+    this.needsRecovery = false;
+    this.waiter?.(false);
+    this.teardown();
+    this.telemetry.add('DIRECT_LINE_DISCONNECTED', 'info', { reason: 'user_or_unmount' });
+    this.handlers.onNotice(null);
+    this.handlers.onState('Not connected');
+  }
+
+  // Requests a fresh credential and creates the Direct Line instance. Returns false on failure.
+  private async open(generation: number): Promise<boolean> {
     let tokenData: TokenResponse;
     try {
       tokenData = await this.requestToken();
     } catch {
-      if (generation === this.generation) {
-        this.connecting = false;
-        this.handlers.onState('Error');
-      }
-      return;
+      return false;
     }
-    if (generation !== this.generation) return; // disconnected while requesting the token
+    if (generation !== this.generation) return false;
 
     const domain = await this.resolveDomain();
-    if (generation !== this.generation) return;
+    if (generation !== this.generation) return false;
 
     this.conversationId = tokenData.conversationId;
     this.instanceId = crypto.randomUUID();
@@ -86,7 +136,6 @@ export class DirectLineService {
     // The token endpoint's conversationId is not a started Direct Line conversation (GET returns 404),
     // so let Direct Line create the conversation and read its ID once online.
     this.directLine = new DirectLine({ token: tokenData.token, domain });
-    this.connecting = false;
     this.telemetry.add('DIRECT_LINE_INSTANCE_CREATED', 'info', { domainHost: domain ? new URL(domain).host : 'default' });
 
     this.subscriptions.push(
@@ -99,15 +148,62 @@ export class DirectLineService {
         error: err => this.onStreamError('activity$', err)
       })
     );
+    return true;
   }
 
-  disconnect(): void {
-    if (!this.isActive) return;
-    this.generation++; // invalidates any in-flight token request
-    this.connecting = false;
-    this.teardown();
-    this.telemetry.add('DIRECT_LINE_DISCONNECTED', 'info', { reason: 'user_or_unmount' });
-    this.handlers.onState('Not connected');
+  private async recover(trigger: string): Promise<void> {
+    if (!this.wanted || this.recovering || this.connecting) return;
+    if (!navigator.onLine) {
+      this.needsRecovery = true; // retried by evaluate() when the network returns
+      this.telemetry.add('RECOVERY_WAITING_FOR_NETWORK', 'warning', { trigger });
+      return;
+    }
+
+    this.recovering = true;
+    this.needsRecovery = false;
+    const generation = ++this.generation;
+    this.handlers.onNotice(null);
+    this.handlers.onState('Reconnecting');
+    this.telemetry.add('RECOVERY_STARTED', 'warning', { trigger, previousDirectLineInstanceId: this.instanceId });
+    this.teardown(); // old subscriptions are cancelled before a new instance exists
+    this.telemetry.add('DIRECT_LINE_DISCONNECTED', 'info', { reason: 'recovery' });
+
+    for (let attempt = 1; attempt <= MAX_RECOVERY_ATTEMPTS; attempt++) {
+      if (!navigator.onLine) {
+        this.recovering = false;
+        this.needsRecovery = true;
+        this.telemetry.add('RECOVERY_WAITING_FOR_NETWORK', 'warning', { trigger, attempt });
+        return;
+      }
+      this.telemetry.add('RECOVERY_ATTEMPT', 'info', { attempt, maxAttempts: MAX_RECOVERY_ATTEMPTS });
+      const ok = (await this.open(generation)) && (await this.waitOnline());
+      if (generation !== this.generation) return; // disconnect() took over
+      if (ok) {
+        this.recovering = false;
+        this.telemetry.add('RECOVERY_SUCCEEDED', 'info', { attempt, directLineInstanceId: this.instanceId });
+        this.handlers.onNotice('Connection restored. A new conversation was started.');
+        return;
+      }
+      this.teardown();
+      if (attempt < MAX_RECOVERY_ATTEMPTS) {
+        await new Promise(resolve => setTimeout(resolve, RECOVERY_BACKOFF_MS * attempt));
+        if (generation !== this.generation) return;
+      }
+    }
+
+    this.recovering = false;
+    this.wanted = false; // the user must press Connect; no endless background retries
+    this.telemetry.add('RECOVERY_FAILED', 'error', { attempts: MAX_RECOVERY_ATTEMPTS, trigger });
+    this.handlers.onNotice('The session could not be recovered. Press Connect to start a new one.');
+    this.handlers.onState('Error');
+  }
+
+  private waitOnline(): Promise<boolean> {
+    if (this.lastStatus === ConnectionStatus.Online) return Promise.resolve(true);
+    return new Promise(resolve => {
+      const timer = setTimeout(() => { this.waiter = null; resolve(false); }, ONLINE_TIMEOUT_MS);
+      this.waiter = online => { clearTimeout(timer); this.waiter = null; resolve(online); };
+    });
   }
 
   send(text: string): void {
@@ -123,9 +219,12 @@ export class DirectLineService {
       { textLength: text.length, directLineInstanceId: instanceId, conversationId }, correlationId);
     record('started');
 
-    if (!this.directLine) {
+    if (!this.directLine || this.recovering) {
+      const reason = this.recovering
+        ? { name: 'Reconnecting', message: 'Sending is paused while the connection is being recovered' }
+        : { name: 'NotConnected', message: 'Direct Line connection is not available' };
       this.telemetry.add('MESSAGE_SEND_FAILED', 'error',
-        { error: { name: 'NotConnected', message: 'Direct Line connection is not available' }, elapsedMs: elapsed(), directLineInstanceId: instanceId, conversationId }, correlationId);
+        { error: reason, elapsedMs: elapsed(), directLineInstanceId: instanceId, conversationId }, correlationId);
       record('failed');
       return;
     }
@@ -199,6 +298,7 @@ export class DirectLineService {
   }
 
   private onStatus(status: ConnectionStatus): void {
+    this.lastStatus = status;
     const liveId = (this.directLine as unknown as { conversationId?: string } | null)?.conversationId;
     if (liveId && liveId !== this.conversationId) {
       this.conversationId = liveId;
@@ -212,18 +312,24 @@ export class DirectLineService {
     });
     switch (status) {
       case ConnectionStatus.Online:
+        this.wanted = true;
         this.handlers.onState('Online');
+        this.waiter?.(true);
         break;
       case ConnectionStatus.ExpiredToken:
       case ConnectionStatus.FailedToConnect:
-        this.failed = true;
-        this.handlers.onState('Error'); // no automatic recovery
-        break;
       case ConnectionStatus.Ended:
-        this.handlers.onState('Not connected');
+        this.waiter?.(false);
+        if (this.recovering) break; // the recovery loop decides what happens next
+        this.failed = true;
+        this.handlers.onState('Error');
+        if (this.wanted) {
+          this.needsRecovery = true;
+          if (document.visibilityState === 'visible') void this.recover(`status_${STATUS_NAMES[status]}`);
+        }
         break;
       default:
-        this.handlers.onState('Connecting');
+        this.handlers.onState(this.recovering ? 'Reconnecting' : 'Connecting');
     }
   }
 
@@ -244,12 +350,19 @@ export class DirectLineService {
 
   private onStreamError(stream: string, err: unknown): void {
     this.telemetry.add('DIRECT_LINE_ACTIVITY_STREAM_ERROR', 'error', { stream, error: errorInfo(err) });
+    this.waiter?.(false);
+    if (this.recovering) return;
     this.failed = true;
     this.handlers.onState('Error');
+    if (this.wanted) {
+      this.needsRecovery = true;
+      if (document.visibilityState === 'visible') void this.recover('stream_error');
+    }
   }
 
   private teardown(): void {
     this.failed = false;
+    this.lastStatus = ConnectionStatus.Uninitialized;
     this.subscriptions.forEach(s => s.unsubscribe());
     this.subscriptions = [];
     this.directLine?.end();

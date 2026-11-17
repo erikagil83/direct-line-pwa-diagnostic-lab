@@ -32,6 +32,12 @@ Events are kept in memory (max 500) and shown in the Diagnostics panel; **Downlo
 
 Tokens, authorization data and message text are never logged, stored or downloaded.
 
+## Phase 2: automatic connection recovery
+
+When the app returns to the foreground (or the network comes back) it checks the connection. The connection is recreated when the status is not Online, when the app was in the background for more than 2 minutes (the socket may be silently dead), or when a recovery was pending because the device was offline.
+
+Recovery: sending is paused and a "Reconnecting" status is shown, the old subscriptions and instance are released, a **new token** is requested, a new Direct Line instance is created (never two at once), and up to 3 attempts are made with backoff. If it cannot be recovered the user is told to press Connect. A recovered session starts a **new conversation** (previous conversation context is not resumed). Events: `CONNECTION_HEALTH_CHECK`, `RECOVERY_STARTED`, `RECOVERY_ATTEMPT`, `RECOVERY_WAITING_FOR_NETWORK`, `RECOVERY_SUCCEEDED`, `RECOVERY_FAILED`.
+
 ## Quick test
 
 1. Connect, send a message, confirm the reply.
